@@ -66,77 +66,9 @@ That's ~20 services composed into one coherent system, which is the actual skill
 
 ## 4. Architecture overview
 
-```mermaid
-flowchart TB
-    classDef free fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
-    classDef paid fill:#fff3e0,stroke:#e65100,color:#bf360c
-    classDef data fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
-    classDef ops fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c
-    classDef dlq fill:#ffebee,stroke:#c62828,color:#b71c1c,stroke-dasharray:4 3
-
-    LG(["loadgen CLI / payment provider"])
-
-    subgraph SL["ALWAYS-ON · serverless spine · ≈ $0/mo · layer 10"]
-        direction TB
-        APIGW["API Gateway HTTP API<br/>webhook.aws.gmora.work<br/>POST /webhook"]:::free
-        ING["λ lf-ingest (Go)<br/>HMAC verify · 202"]:::free
-        SNS["SNS lf-payments<br/>attr: eventType, traceparent"]:::free
-
-        QF["SQS lf-fraud-q<br/>vis 120s"]:::free
-        QN["SQS lf-notify-q<br/>filter: payment.settled"]:::free
-        QA["SQS lf-archive-q<br/>no filter"]:::free
-        DF["lf-fraud-dlq"]:::dlq
-        DN["lf-notify-dlq"]:::dlq
-        DA["lf-archive-dlq"]:::dlq
-
-        NOT["λ lf-notify (Go)<br/>batch 10 · partial fail"]:::free
-        ARC["λ lf-archiver (Go)<br/>batch 25 → NDJSON"]:::free
-
-        DDB[("DynamoDB lf-ledger<br/>PK/SK + GSI1 + GSI2<br/>on-demand · PITR · TTL")]:::data
-        S3A[("S3 lf-archive<br/>year=/month=/day=<br/>IA 30d · expire 180d")]:::data
-    end
-
-    subgraph SO["SESSION-ONLY · just up / just down · layers 20+30"]
-        direction TB
-        ALB["ALB lf-alb (HTTPS, ACM)<br/>api.aws.gmora.work"]:::paid
-        API["ECS Fargate ledger-api (Go)<br/>2 tasks · 2 AZ · private subnets"]:::paid
-        FW["ECS Fargate fraud-worker (Go)<br/>long-poll · graceful drain<br/>autoscale 1→3 on backlog/task"]:::paid
-        VPCE["VPC endpoints<br/>S3·DDB gw / ecr·logs·sqs·ssm ifc<br/>(no NAT, no internet)"]:::paid
-    end
-
-    subgraph XC["CROSS-CUTTING · layer 10"]
-        direction TB
-        EB["EventBridge Scheduler"]:::ops
-        CAN["λ lf-canary 5m<br/>synthetic signed event"]:::ops
-        REC["λ lf-reconciler daily<br/>S3 count vs ledger count"]:::ops
-        CW["CloudWatch<br/>EMF metrics · 11 alarms<br/>L1/L2/L3 dashboard"]:::ops
-        AL["SNS lf-alerts → email"]:::ops
-        CF["CloudFront + S3 (OAC)<br/>status.aws.gmora.work"]:::ops
-    end
-
-    LG -->|"HMAC-signed POST"| APIGW --> ING --> SNS
-    SNS -->|"prefix: payment.*"| QF
-    SNS -->|"payment.settled"| QN
-    SNS -->|"all events"| QA
-    QF -.->|"3 fails"| DF
-    QN -.->|"3 fails"| DN
-    QA -.->|"3 fails"| DA
-
-    QN --> NOT
-    QA --> ARC --> S3A
-    QF -->|"long poll 20s"| FW
-    FW -->|"idempotent cond. write<br/>score → SETTLED/FLAGGED"| DDB
-
-    ALB --> API -->|"Query / GetItem only"| DDB
-    API & FW -.-> VPCE
-
-    EB --> CAN & REC
-    CAN -->|"synthetic event"| APIGW
-    CAN -.->|"healthz (if up)"| ALB
-    REC --> S3A & DDB
-    DF & DN & DA -.->|"alarm ≥1"| CW
-    CW -->|"burn-rate + static alarms"| AL
-```
+<p align="center">
+    <img src="./resources/ledgerflow-architecture.png" alt="Architecture image"/>
+</p>
 
 The **fraud-worker on Fargate** (not Lambda) is deliberate: you must experience the difference between "SQS triggers Lambda for me" and "my long-running consumer owns the poll loop, visibility timeout, heartbeat, and graceful shutdown" — the ActiveMQ-consumer problem you already know, in AWS clothes.
 
