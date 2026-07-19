@@ -20,7 +20,7 @@ You are the sole platform/SRE engineer for a fictional small fintech, **LedgerFl
 6. **Observability, SLOs, alarms, and runbooks** — because you're the one on call.
 7. Everything reproducible from `git clone` + `terraform apply`. No console-created resources in the final state.
 
-This mirrors your actual work domain (Finsus core banking, queues, observability) but forces you through the AWS-native versions of everything you currently do with WildFly/ActiveMQ/Kubernetes/Grafana.
+This mirrors your actual work domain but forces you through the AWS-native versions of everything you currently do with WildFly/ActiveMQ/Kubernetes/Grafana.
 
 ### Deliberate design decision: two ingress paths
 
