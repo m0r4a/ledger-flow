@@ -55,3 +55,16 @@ aws sts get-caller-identity --profile lf-dev
 ```
 
 And worked properly
+
+### S01 1.2
+
+```bash
+terraform --version
+Terraform v1.15.8
+```
+
+### S01 1.3
+
+I created the tflint file on the root folder
+
+I had issues with the `tflint --init` command apparently my `GITHUB_TOKEN` env var clashes with the request, I unsetted the variable and I was able to run the init command.
