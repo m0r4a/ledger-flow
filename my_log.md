@@ -68,3 +68,20 @@ Terraform v1.15.8
 I created the tflint file on the root folder
 
 I had issues with the `tflint --init` command apparently my `GITHUB_TOKEN` env var clashes with the request, I unsetted the variable and I was able to run the init command.
+
+### S01 1.4
+
+I authenticated and added my user to infracost [the dashboard](https://dashboard.infracost.io/org/m0r4a/overview) but there's nothing to check
+
+### S01 1.5
+
+```bash
+ > go version
+go version go1.26.5-X:nodwarf5 linux/amd64
+
+ > golangci-lint --version
+golangci-lint has version 2.12.2 built with go1.26.3-X:nodwarf5 from c0d3ddc9cf3faa61a4e378e879ece580256d76e5 on 2026-05-31T13:58:06Z
+
+ > docker buildx version
+github.com/docker/buildx 0.35.0 a319e5b15052cf6557ceb666eb8ff6e32380b782
+```
