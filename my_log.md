@@ -85,3 +85,7 @@ golangci-lint has version 2.12.2 built with go1.26.3-X:nodwarf5 from c0d3ddc9cf3
  > docker buildx version
 github.com/docker/buildx 0.35.0 a319e5b15052cf6557ceb666eb8ff6e32380b782
 ```
+
+### S01 1.6
+
+I added the `.justfile` isn't working because there's nothing to check but the file is created
