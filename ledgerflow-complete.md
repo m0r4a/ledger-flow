@@ -126,9 +126,9 @@ Verify: `aws --version` shows 2.x; `terraform version` ≥ 1.10; `docker buildx 
 
 | # | Requirement |
 |---|---|
-| 2.1 | Root: MFA enabled, no access keys exist (`aws iam get-account-summary` → `AccountAccessKeysPresent: 0`) |
+| 2.1 | Root MFA enabled on **both** account roots (management + dev; the management root is the org crown jewel), no access keys on either (`aws iam get-account-summary` → `AccountAccessKeysPresent: 0`) |
 | 2.2 | Account-level: default EBS encryption on; S3 Block Public Access on at account level; `us-east-2` + `us-east-1` only (optional: disable unused regions via… you can't fully, but set an SCP later in stretch X4) |
-| 2.3 | IAM Identity Center enabled in the account (standalone, no org needed yet) |
+| 2.3 | IAM Identity Center enabled. This **requires** an AWS Organization (enabling Identity Center creates one if absent), so the org is mandatory, not optional. Org kept: `mora-management` (payer/management) + `mora-dev` (all workload). Extra workload accounts, SCPs, and delegated admin are stretch X4. |
 | 2.4 | One user (you), MFA enforced |
 | 2.5 | Permission set `LedgerFlowAdmin`: AWS-managed `AdministratorAccess`, session duration **8h** |
 | 2.6 | CLI: `aws configure sso` → profile `lf-dev`; no `[default]` credentials block containing keys anywhere in `~/.aws/credentials` |
@@ -143,10 +143,10 @@ Verify: `aws sts get-caller-identity --profile lf-dev` returns an `assumed-role/
 
 | # | Requirement | Value |
 |---|---|---|
-| 3.1 | AWS Budget `lf-monthly` | $30 USD, monthly, cost type: unblended, ACTUAL alerts at 50% / 80% / 100% + FORECASTED at 100%, email to you |
+| 3.1 | AWS Budget `lf-monthly` (**management account** — consolidated billing covers both accounts) | $30 USD, monthly, cost type: unblended, ACTUAL alerts at 50% / 80% / 100% + FORECASTED at 100%, email to you |
 | 3.2 | SNS topic `lf-alerts` (us-east-2) | Email subscription (confirm it), used by all alarms in S25 |
-| 3.3 | SNS topic `lf-billing-alerts` (**us-east-1**) | Email subscription |
-| 3.4 | CloudWatch alarm `lf-billing-20usd` (**us-east-1**) | `AWS/Billing EstimatedCharges` (requires enabling billing alerts in account prefs — console, document it), threshold ≥ $20, period 6h, 1 datapoint, → 3.3 |
+| 3.3 | SNS topic `lf-billing-alerts` (**management account, us-east-1**) | Email subscription |
+| 3.4 | CloudWatch alarm `lf-billing-20usd` (**management account, us-east-1**) | `AWS/Billing EstimatedCharges` only surfaces in the payer/management account (member-account charges roll up there), which is why 3.1/3.3/3.4 all live in management. Requires enabling billing alerts in account prefs (console, document it), threshold ≥ $20, period 6h, 1 datapoint, → 3.3 |
 | 3.5 | Mechanism test | Temporarily set a $1 budget, receive the email, delete it. An untested alert doesn't exist. |
 
 ---
@@ -155,8 +155,8 @@ Verify: `aws sts get-caller-identity --profile lf-dev` returns an `assumed-role/
 
 | # | Requirement | Value |
 |---|---|---|
-| 4.1 | Trail `lf-audit` | Multi-region, **management events only** (data events cost money and you don't need them), log file validation on |
-| 4.2 | Destination bucket `lf-audit-<account-id>` | SSE-S3, Block Public Access, bucket policy exactly per the CloudTrail docs template, lifecycle: expire objects at 90 days |
+| 4.1 | Trail `lf-audit` (**organization trail**, created in the management account) | Multi-region, org-wide (captures both accounts into one bucket), **management events only** (data events cost money and you don't need them), log file validation on |
+| 4.2 | Destination bucket `lf-audit-<mgmt-account-id>` (management account) | SSE-S3, Block Public Access, **org-trail** bucket policy template (it differs from the single-account one — the policy must allow the org's member accounts), lifecycle: expire objects at 90 days |
 | 4.3 | Skill requirement | Run one `aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=CreateBucket` and read the output. You'll use this when Terraform confuses you. |
 
 ---
@@ -167,14 +167,16 @@ Verify: `aws sts get-caller-identity --profile lf-dev` returns an `assumed-role/
 |---|---|---|
 | 5.1 | State bucket `lf-tfstate-<account-id>` | Versioning ON, SSE-S3, Block Public Access, lifecycle: keep 30 noncurrent versions |
 | 5.2 | Backend config per layer | `use_lockfile = true`; **no DynamoDB lock table** (legacy pattern) |
-| 5.3 | State keys | `00-foundation/tf.tfstate`, `10-serverless/tf.tfstate`, `20-network/tf.tfstate`, `30-compute/tf.tfstate` |
+| 5.3 | State keys | `00-org/tf.tfstate` (**management account**), `00-foundation/tf.tfstate`, `10-serverless/tf.tfstate`, `20-network/tf.tfstate`, `30-compute/tf.tfstate` |
 | 5.4 | Bootstrap sequence | Bucket created by `00-foundation` with local state first, then `terraform init -migrate-state`. Document the chicken-and-egg in `docs/bootstrap.md` — same class of problem as your Cilium/Flux bootstrap. |
-| 5.5 | Layer contents | 00: S02-remnants, S03, S04, S06, S07, S19. 10: S08–S14, S23, S24, most of S25. 20: S15–S18. 30: S20–S22 + compute alarms. |
-| 5.6 | Cross-layer wiring | Producers write outputs to SSM `/lf/dev/tf/<layer>/<name>`; consumers read via `data "aws_ssm_parameter"`. No `terraform_remote_state` (tighter coupling, broader state read perms — know this trade-off, it's an interview question). |
+| 5.5 | Layer contents | **00-org (management acct): S03 budget + billing alarm, S04 org trail.** 00-foundation (dev acct): S02 remnants, S06, S07, S18 cert A (see 18.4), S19. 10: S08–S14, S23, S24, most of S25. 20: S15–S17. 30: S20–S22 + compute alarms. |
+| 5.6 | Cross-layer wiring | **[you decide, ADR]** default: producers write outputs to SSM `/lf/dev/tf/<layer>/<name>`, consumers read via `data "aws_ssm_parameter"`. Chosen over `terraform_remote_state` because the cross-layer value set is small (VPC/subnet/SG IDs, ARNs) and remote_state grants read of the producer's *entire* state file — a weaker least-privilege story. Alternative to weigh in the ADR: remote_state guarded by a dedicated read-only state IAM role. |
 | 5.7 | Provider `default_tags` | `project=ledgerflow`, `layer=<NN-name>`, `managed-by=terraform`, `repo=github.com/m0r4a/<repo>` |
 | 5.8 | Repo layout | `infra/{00-foundation,10-serverless,20-network,30-compute}/`, `services/{ledger-api,fraud-worker}/`, `functions/{ingest,notify,archiver,canary,reconciler}/`, `loadgen/`, `docs/{runbooks,gamedays,adr}/`, `justfile` |
 | 5.9 | `justfile` targets | `up` (apply 20 then 30), `down` (destroy 30 then 20), `status` (list ALBs, ECS services, NAT GWs — should print NAT count 0), `cost` (infracost on changed dirs) |
 | 5.10 | Version pins | `required_version` and AWS provider version pinned with `~>` in every layer; `.terraform.lock.hcl` committed |
+| 5.11 | Provider auth | Two SSO profiles: `lf-mgmt` (management account, used only by `00-org`) and `lf-dev` (dev account, all other layers). No cross-account role assumption yet — each layer targets exactly one account. |
+| 5.12 | Destroy guards | `prevent_destroy = true` on the always-on stateful resources: Route53 hosted zone, tfstate bucket, audit bucket, ECR repos, DynamoDB table. Documented one-line override in `docs/runbooks/dr-drill.md` for the R9.3 DR drill (the only sanctioned destroy of the data layer). |
 
 Verify: two concurrent `terraform apply` runs in one layer → second fails on lock. `just down && just up` completes hands-off.
 
@@ -240,7 +242,7 @@ Verify: `dig +trace webhook.aws.gmora.work` and follow the delegation hop by hop
 
 | # | Requirement | Value |
 |---|---|---|
-| 10.1 | Table `lf-ledger` | On-demand (PAY_PER_REQUEST), PITR on, deletion protection OFF (the DR drill destroys it deliberately), TTL on attribute `expiresAt` |
+| 10.1 | Table `lf-ledger` | On-demand (PAY_PER_REQUEST), **PITR off** (the DR drill R9.3 uses native export/import, not point-in-time restore — don't pay for a capability you never exercise), deletion protection OFF (the DR drill destroys it deliberately), TTL on attribute `expiresAt` |
 | 10.2 | Keys | `PK` (S) / `SK` (S); GSI1: `GSI1PK`/`GSI1SK` (S/S, ALL projection); GSI2: `GSI2PK`/`GSI2SK` (S/S, KEYS_ONLY + `amount`,`status` via INCLUDE) |
 | 10.3 | Reference schema (deviate only with a written ADR) | **Transaction:** `PK=CUST#<customerId>`, `SK=TXN#<rfc3339ts>#<txnId>`, `GSI1PK=TXN#<txnId>`, `GSI1SK=META`, `GSI2PK=STATUS#<status>#<yyyy-mm-dd>`, `GSI2SK=<rfc3339ts>`, attrs: `amount` (N, cents — never floats for money), `currency`, `status` ∈ {SETTLED, FLAGGED, FAILED}, `fraudScore` (N), `providerEventId`. **Idempotency:** `PK=IDEM#<providerEventId>`, `SK=IDEM`, `expiresAt` = now+7d epoch seconds. |
 | 10.4 | Access-pattern → query mapping (commit as `docs/adr/002-dynamodb-schema.md`) | AP1 get-by-txnId → GSI1 GetItem-equivalent Query; AP2 customer history newest-first → Query PK, `ScanIndexForward=false`, paginated; AP3 flagged-in-range → GSI2 Query with SK `BETWEEN`; AP4 idempotency → conditional `PutItem` with `attribute_not_exists(PK)` |
@@ -317,8 +319,9 @@ Behavioral requirements:
 | 13.8 | `notify` & `archiver`: partial-batch failure implemented and unit-tested — a batch of 10 with 1 failure returns exactly that 1 `messageId` in `batchItemFailures` |
 | 13.9 | `archiver`: aggregates the batch into one NDJSON S3 object per invocation (key per S09.2) |
 | 13.10 | `canary`: sends a signed synthetic event with attribute `synthetic=true` (which `fraud-worker` and `notify` drop before side-effects, `archiver` keeps but under `events-synthetic/` prefix); also GETs `https://api.aws.gmora.work/healthz` and tolerates its absence (layer 30 may be down — that's not a canary failure, log and skip); emits EMF metrics `CanaryIngestOk`, `CanaryIngestLatencyMs` |
-| 13.11 | `reconciler`: for yesterday (UTC): count archive events vs. GSI2 items across statuses; emit EMF `ReconciliationDrift` (absolute count); drift ≠ 0 → also a structured WARN log |
+| 13.11 | `reconciler`: for yesterday (UTC): count archive events vs. GSI2 items across statuses; emit EMF `ReconciliationDrift` (absolute count). Small drift is expected (velocity scoring is racy, S21.11) — WARN only above a documented threshold, not on every off-by-one; drift beyond it → structured WARN log |
 | 13.12 | Deploy: zip via CI on `main`; ingest additionally gets `aws lambda update-function-code` + wait-for-active in the workflow |
+| 13.13 | `ingest`: reserved concurrency capped (pick a number, e.g. 50) — an explicit blast-radius and cost ceiling so a load-test burst can't fan out to the account default (1000) concurrent executions. Understand reserved (a cap) vs provisioned (pre-warmed against cold starts); ADR the number. |
 
 ---
 
@@ -374,7 +377,7 @@ Behavioral requirements:
 
 | SG | Inbound | Outbound |
 |---|---|---|
-| `lf-alb-sg` | 80/tcp from 0.0.0.0/0; 443/tcp from 0.0.0.0/0 | 8080/tcp to `lf-api-sg` |
+| `lf-alb-sg` | 443/tcp from within the VPC / a bastion SG (**internal ALB — no `0.0.0.0/0`**); optional 80/tcp same source for the redirect | 8080/tcp to `lf-api-sg` |
 | `lf-api-sg` | 8080/tcp from `lf-alb-sg` (SG reference, never CIDR) | 443/tcp to `lf-vpce-sg`; 443/tcp to prefix lists of the two gateway endpoints |
 | `lf-worker-sg` | none | same outbound as `lf-api-sg` |
 | `lf-vpce-sg` | 443/tcp from `lf-api-sg` and `lf-worker-sg` | none needed |
@@ -391,10 +394,10 @@ Behavioral requirements:
 
 | # | Requirement | Value |
 |---|---|---|
-| 18.1 | Cert A (us-east-2, layer 20) | CN `api.aws.gmora.work`, SAN `webhook.aws.gmora.work` — used by ALB and API GW custom domain |
+| 18.1 | Cert A (us-east-2, **always-on layer — 00 or 10, see 18.4, not 20**) | CN `api.aws.gmora.work`, SAN `webhook.aws.gmora.work` — used by the ALB (layer 30, referenced by ARN via SSM) and the API GW custom domain (layer 10) |
 | 18.2 | Cert B (us-east-1, layer 30, provider alias) | CN `status.aws.gmora.work` — CloudFront requires us-east-1; this is the multi-provider-alias Terraform exercise |
 | 18.3 | Validation | DNS, fully automated: `aws_acm_certificate` → `aws_route53_record` (for_each over domain_validation_options) → `aws_acm_certificate_validation` |
-| 18.4 | Wait — cert A is in layer 20 but API GW (layer 10) needs it? | Yes: deliberate wrinkle. Resolve it: **[you decide]** — move the cert to 00 (lives forever, free, simplest), or accept that the custom domain attaches only while 20 exists. Write ADR-003 with your choice and reasoning. Hint: ACM certs are free and idle certs cost nothing. |
+| 18.4 | Cert A also serves the always-on webhook custom domain (layer 10), so it **cannot** live in layer 20 — tearing down 20 each session would kill the 24/7 endpoint (violates G3). The real decision is **[you decide]** 00-foundation vs 10-serverless, both always-on. The ALB in layer 30 references the cert by ARN (via SSM, per 5.6). Write ADR-003. ACM certs are free and idle certs cost nothing. |
 
 ---
 
@@ -414,7 +417,7 @@ Behavioral requirements:
 
 | # | Requirement | Value |
 |---|---|---|
-| 20.1 | ALB `lf-alb` | internet-facing, subnets: both public, SG `lf-alb-sg`, `drop_invalid_header_fields = true`, idle timeout 60 s |
+| 20.1 | ALB `lf-alb` | **internal** (scheme `internal`) — the query API is internal-staff-only (§1.4), so it must not sit on the public internet; subnets: both **private**, SG `lf-alb-sg`, `drop_invalid_header_fields = true`, idle timeout 60 s. Reach it from your laptop via SSM port-forward or a bastion, not the open internet. |
 | 20.2 | Listener :80 | Fixed action: redirect 301 → https |
 | 20.3 | Listener :443 | Cert A, SSL policy `ELBSecurityPolicy-TLS13-1-2-2021-06`, default action → `lf-api-tg` |
 | 20.4 | Target group `lf-api-tg` | target_type `ip` (Fargate requirement), port 8080, HTTP; health check: path `/healthz`, interval 15 s, timeout 5 s, healthy 2, unhealthy 3; `deregistration_delay = 30` |
@@ -437,7 +440,7 @@ Behavioral requirements:
 | 21.8 | Service `fraud-worker` | desired 1, no LB, ECS Exec enabled, capacity: **[you decide]** Fargate vs Fargate Spot (worker is interruption-tolerant by design — is it really? What happens to an in-flight message on SIGTERM? You built graceful drain; Spot gives 120 s warning. ADR it.) |
 | 21.9 | Worker autoscaling | App Auto Scaling target 1→3; target-tracking on **backlog per task** = `ApproximateNumberOfMessagesVisible / RunningTaskCount` via CloudWatch metric math, target 30; scale-in cooldown 300 s, scale-out 60 s |
 | 21.10 | Go: `ledger-api` | Endpoints: `GET /healthz` (liveness: 200 always if process up), `GET /readyz` (checks a cheap DynamoDB call once/10 s cached), `GET /transactions/{id}` (AP1), `GET /customers/{id}/transactions?limit=&cursor=` (AP2, cursor = base64 of `LastEvaluatedKey`), `POST /transactions/search` (AP3: `{"status": "...", "from": "...", "to": "..."}`). Mat Ryer server pattern, `http.Server` timeouts set (Read 5 s / Write 10 s / Idle 60 s), graceful shutdown on SIGTERM ≤ 25 s |
-| 21.11 | Go: `fraud-worker` | Long-poll loop (wait 20 s, max 10 msgs); per message: drop if `synthetic=true`, idempotency conditional-put, score (rules: amount > 500 000 cents → +40; > 3 events same customer in 60 s → +30 — needs the velocity Query; score ≥ 50 → status FLAGGED else SETTLED), write TXN item, delete message. SIGTERM: stop receiving, finish in-flight, exit < 25 s. Extend visibility (`ChangeMessageVisibility`) if a message will exceed 60 s. |
+| 21.11 | Go: `fraud-worker` | Long-poll loop (wait 20 s, max 10 msgs); per message: drop if `synthetic=true`, idempotency conditional-put, score (rules: amount > 500 000 cents → +40; > 3 events same customer in 60 s → +30 — needs the velocity Query; score ≥ 50 → status FLAGGED else SETTLED), write TXN item, delete message. SIGTERM: stop receiving, finish in-flight, exit < 25 s. Extend visibility (`ChangeMessageVisibility`) if a message will exceed 60 s. **Velocity scoring is best-effort:** with up to 3 concurrent workers and at-least-once delivery, the velocity Query can undercount (two workers score the same customer in parallel). Accepted, not fixed — do not serialize. Idempotency stays exact regardless (conditional write, not read-then-count). |
 | 21.12 | Deploy contract (CI) | Register new task-def revision with new image SHA → `ecs update-service` → `aws ecs wait services-stable` → fail the job if rollback triggered |
 | 21.13 | Verify | S16.3/16.4 pass; kill-one-task-under-load → zero 5xx at the ALB; 500-message flood → scales to 3, drains, returns to 1; measure drain time and compare to your Little's-Law prediction *made beforehand* |
 
@@ -501,7 +504,7 @@ Keep total custom metric streams < 10 — each metric×dimension-set bills ~$0.3
 | 24.1 | Dashboard `lf-overview`, three rows mirroring your L1/L2/L3 model: **L1** EventsIngested rate, CanaryIngestOk, ProcessingLatencyMs p95, error-rate %; **L2** per-queue depth+age, running task counts, Lambda duration p95 + errors, ALB p99; **L3** links/widgets: Logs Insights saved queries, `EstimatedCharges` |
 | 24.2 | Three Logs Insights queries saved *and* committed in runbooks: find event by `providerEventId` across all groups; ingest rejects by reason over time; fraud-worker errors ±5 min around a timestamp |
 | 24.3 | SLO doc `docs/slos.md`: ingest availability 99.5%/30 d (SLI: canary success rate), ingest p99 < 500 ms, event→ledger p95 < 60 s; each SLI maps to a metric above; error-budget arithmetic written out once by hand |
-| 24.4 | Tracing: ADOT sidecar **[you decide: sidecar container vs. X-Ray SDK direct]** on both ECS services; Lambdas via active tracing; `traceparent` propagated through SNS/SQS message attributes and re-attached in consumers (span links). One documented trace screenshot end-to-end: API GW → ingest → fraud-worker → DynamoDB. |
+| 24.4 | Tracing: **[you decide: ADOT Collector sidecar container vs. OpenTelemetry SDK in-process]** on both ECS services — the X-Ray SDK is in maintenance, so use OTel either way and export to X-Ray; Lambdas via active tracing; `traceparent` propagated through SNS/SQS message attributes and re-attached in consumers (span links). One documented trace screenshot end-to-end: API GW → ingest → fraud-worker → DynamoDB. |
 | 24.5 | Verify | Revoke fraud-worker's `dynamodb:PutItem` (one-line TF change): `lf-fraud-backlog-age` fires < 10 min; runbook `docs/runbooks/backlog-growing.md` leads from that email to the CloudTrail/IAM root cause |
 
 ---
@@ -600,7 +603,7 @@ Guardrails: the two-mechanism billing alert (R0.3), `infracost` on every new res
 - **X1 — Step Functions**: replace the fraud flow with a state machine (score → human-review-wait via task token → settle). Teaches the saga/orchestration side of the orchestration-vs-choreography debate your SNS design embodies.
 - **X2 — Aurora Serverless v2** (scale-to-zero) as a reporting replica fed by DynamoDB Streams → Lambda. CDC pipeline + the Lambda-in-VPC experience you deliberately skipped.
 - **X3 — Athena + Glue** over the S3 archive: SQL over your NDJSON, partition projection, cost-per-query awareness.
-- **X4 — Multi-account** with AWS Organizations: split workload from management account; the single biggest "works at real scale" signal.
+- **X4 — Multi-account, expanded**: you already run an org (management + dev). X4 adds the rest — additional workload accounts (e.g. prod), SCPs on the workload OU, centralized/delegated CloudTrail admin, org-wide Access Analyzer. The single biggest "works at real scale" signal.
 - **S5 — Ship CloudWatch → your homelab Grafana** via ADOT/CloudWatch exporter: unify both worlds on one pane, very on-brand for you.
 
 
